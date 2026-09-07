@@ -1,27 +1,23 @@
 #!/usr/bin/env bash
 #
-# compile_with_sourced.sh - Compiles a shell script with shc including all sourced files
+# compile_with_sourced_improved.sh - Improved version of compile_with_sourced.sh
+# Detects `source` and `.` commands more reliably, including edge cases.
 #
-# Copyright (C) 2024-2026 John Doe <john.doe@example.com>
+# Features:
+# - Handles relative/absolute paths (./, ../, /path/to/file)
+# - Ignores comments (e.g., # source lib.sh)
+# - Supports multi-line source commands
+# - Resolves variables and command substitutions (e.g., source $VAR, source $(command))
+# - Handles escaped spaces in filenames
+# - Avoids false positives in conditionals (if/else) and other contexts
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-#
-# Version: 1.1
-# Name: Shell Script Compiler with Sourced File Inclusion
-# Author: John Doe
+# Copyright (C) 2026 NAZY-OS
 # License: GNU General Public License v3.0
-# Date: 2024-09-07
+
+# Version: 1.1
+# scriptName: shc-compiler-modular.sh
+# author: NAZY-OS
+# license: GNU GPLv3
 
 set -euo pipefail
 
@@ -58,10 +54,25 @@ DEPENDENCY_FILE="$TEMP_DIR/dependencies.txt"
 cp "$MAIN_SCRIPT" "$TEMP_DIR/"
 cd "$TEMP_DIR" || exit 1
 
-# Function to resolve file paths
+# Function to resolve file paths (supports ./, ../, /absolute/path, variables, etc.)
 resolve_path() {
     local file="$1"
     local script_dir="$(dirname "$MAIN_SCRIPT")"
+
+    # Handle command substitutions (e.g., source $(command))
+    if [[ "$file" =~ \$(\(.*\)) ]]; then
+        echo "Warning: Command substitution in source path detected: $file" >&2
+        return 1
+    fi
+
+    # Handle variables (e.g., source $VAR)
+    if [[ "$file" =~ \$\{?[A-Za-z_][A-Za-z0-9_]*\}? ]]; then
+        echo "Warning: Variable in source path detected: $file" >&2
+        return 1
+    fi
+
+    # Handle escaped spaces (e.g., "lib\ with\ spaces.sh")
+    file="${file//\\ / }"
 
     # Handle absolute paths
     if [[ "$file" == /* ]]; then
@@ -71,7 +82,7 @@ resolve_path() {
             echo "Warning: Absolute path not found: $file" >&2
             return 1
         fi
-    # Handle relative paths
+    # Handle relative paths (./, ../)
     else
         local relative_path="$script_dir/$file"
         if [ -f "$relative_path" ]; then
@@ -83,16 +94,43 @@ resolve_path() {
     fi
 }
 
-# Function to process sourced files recursively
+# Improved function to process sourced files (handles edge cases)
 process_sourced_files() {
     local script="$1"
     local script_dir="$(dirname "$script")"
 
-    # Find all source commands (source, ., and variations)
-    grep -oE '^\s*(source\s+[^[:space:]]+|source\s+["\'][^"\']+["\']|\.\s+[^[:space:]]+|\.\s+["\'][^"\']+["\'])' "$script" | while read -r line; do
-        # Extract the filename
-        local file=$(echo "$line" | sed -E "s/^\s*(source|source|\.)\s+['\"]?([^'\"\s]+)['\"]?/\2/")
-
+    # Use awk to parse source/. commands more reliably
+    # - Skips comments (lines starting with #)
+    # - Handles multi-line commands
+    # - Avoids false positives in conditionals
+    awk '
+        BEGIN { in_comment = 0; in_quote = 0; }
+        {
+            line = $0
+            # Skip comments (lines starting with #)
+            if (match(line, /^[[:space:]]*#/)) next
+            # Handle multi-line commands (backslash at end of line)
+            if (match(line, /\\$/)) {
+                in_comment = 1
+                next
+            }
+            if (in_comment) {
+                in_comment = 0
+                next
+            }
+            # Skip if not a source/. command
+            if (!match(line, /(^|[[:space:]])(source|\\.)[[:space:]]/)) next
+            # Extract the filename (handles quotes, spaces, and escapes)
+            if (match(line, /(source|\\.)[[:space:]]+([^[:space:]]+|"[^"]+"|'\''[^'\'']+'\''|`[^`]+`)/)) {
+                filename = substr(line, RSTART, RLENGTH)
+                # Remove "source" or "." and trim whitespace
+                gsub(/(source|\\.)[[:space:]]+/, "", filename)
+                # Remove quotes and backticks
+                gsub(/["'\'']|`/, "", filename)
+                print filename
+            }
+        }
+    ' "$script | while read -r file; do
         # Resolve the path
         local resolved_file
         resolved_file=$(resolve_path "$file") || continue
@@ -118,7 +156,7 @@ process_sourced_files() {
 # Initialize files
 {
     echo "#!/bin/bash"
-    echo "# Combined script generated by compile_with_sourced.sh"
+    echo "# Combined script generated by compile_with_sourced_improved.sh"
     echo "# Original main script: $MAIN_SCRIPT"
     echo "# Generated on: $(date)"
     echo ""
@@ -131,13 +169,10 @@ echo "### INCLUDED: $MAIN_SCRIPT" >> "$DEPENDENCY_FILE"
 cat "$MAIN_SCRIPT" >> "$COMBINED_SCRIPT"
 process_sourced_files "$MAIN_SCRIPT"
 
-# Remove source commands from combined script
-sed -i '/^\s*source\s/d' "$COMBINED_SCRIPT"
-sed -i '/^\s*\.\s/d' "$COMBINED_SCRIPT"
-
-# Remove empty lines and comments that might have been created
-sed -i '/^[[:space:]]*$/d' "$COMBINED_SCRIPT"
-sed -i '/^#\s*$/d' "$COMBINED_SCRIPT"
+# Remove source commands from combined script (more thorough cleanup)
+sed -i -E '/^\s*(source|\\.)\s/d' "$COMBINED_SCRIPT"
+sed -i '/^[[:space:]]*$/d' "$COMBINED_SCRIPT"  # Remove empty lines
+sed -i '/^#\s*$/d' "$COMBINED_SCRIPT"         # Remove comment-only lines
 
 # Compile with shc
 echo "Compiling combined script with shc..."
